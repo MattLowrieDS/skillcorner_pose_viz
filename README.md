@@ -1,180 +1,10 @@
----
-license: mit
-pretty_name: SkillCorner Open Data — Body Pose
-language:
-  - en
-tags:
-  - football
-  - soccer
-  - sports-analytics
-  - tracking-data
-  - body-pose
-  - biomechanics
-size_categories:
-  - 1M<n<10M
----
+# SkillCorner Open Data Body Pose Visualizer
 
-# SkillCorner Open Data — Body Pose
-
-3D body-pose data derived from broadcast video, released alongside the
-[SkillCorner Open Data](https://github.com/SkillCorner/opendata) repository as a
-joint initiative between [SkillCorner](https://skillcorner.com) and
-[PySport](https://pysport.org/).
-
-> **Initial testing release.** Two matches, published so the community can work
-> with the format and tell us what is useful before we consider a wider release.
-> Feedback is genuinely wanted — open an issue on the
-> [opendata repo](https://github.com/SkillCorner/opendata/issues) or reply in the
-> Community tab here.
-
-## What is in here
-
-| File | Match | Size |
-|---|---|---|
-| `raw/1925299.jsonl.zip` | Brisbane Roar v Perth Glory, 2024-12-21 | 595 MB |
-| `raw/1996435.jsonl.zip` | Sydney FC v Adelaide United, 2025-02-01 | 614 MB |
-
-Each archive contains one `.jsonl` file — one JSON object per video frame,
-about 3.3 GB uncompressed. Both matches are from the Australian A-League
-2024/2025 season (competition edition 870), and **both already have tracking,
-dynamic events and phases of play published** in the opendata repo, so pose can
-be joined to the rest of the data for the same games.
-
-## Record structure
-
-One object per frame:
-
-```json
-{
-  "frame": 2438,
-  "timestamp": "00:01:36.52",
-  "period": 1,
-  "ball_data": {"x": 0.35, "y": -22.22, "z": 7.074, "is_detected": true},
-  "possession": {"player_id": null, "group": "away team"},
-  "image_corners_projection": {"x_top_left": -44.26, "y_top_left": 39.0, "...": "..."},
-  "player_data": [
-    {
-      "player_id": 809166,
-      "x": -17.36,
-      "y": -22.06,
-      "is_detected": true,
-      "joints": {
-        "lAnkle": {"xyz": [-25.042, 0.86, 0.204], "p90_mae_cm": 12.39},
-        "lEar":   {"xyz": [-25.016, 0.815, 1.809], "p90_mae_cm": 9.29},
-        "...": "..."
-      }
-    }
-  ]
-}
-```
-
-Coordinates are in **metres**, origin at the centre of the pitch, x along the
-long axis and y along the short axis — the same convention as the tracking data
-in the opendata repo.
-
-> **`z` is not a height above the pitch.** It is accurate *relative to the
-> player's centroid*, but not necessarily in the pitch coordinate system, so it
-> can be negative. Treat it as pose geometry rather than elevation. This will
-> improve with future Body Pose enhancements.
-
-Note that `ball_data` also carries `z`, which the 10 fps tracking files do not.
-
-The 2D `x`/`y` positions in this file are the standard tracking positions
-**interpolated** up to 25 fps, not native 25 fps measurements.
-
-### The 29 joints
-
-`nose`, `neck`, `lEye`, `rEye`, `lEar`, `rEar`, `lShoulder`, `rShoulder`,
-`lElbow`, `rElbow`, `lWrist`, `rWrist`, `lThumb`, `rThumb`, `lPinky`, `rPinky`,
-`midHip`, `lHip`, `rHip`, `lKnee`, `rKnee`, `lAnkle`, `rAnkle`, `lHeel`,
-`rHeel`, `lBigToe`, `rBigToe`, `lSmallToe`, `rSmallToe`
-
-### `p90_mae_cm`
-
-Every joint carries its own accuracy estimate: the 90th-percentile mean absolute
-error in centimetres. Typical values run **7–15 cm**, varying by joint — torso
-and head landmarks are more reliable than extremities. Use it to filter: joints
-with a high `p90_mae_cm` should not be trusted for fine-grained biomechanics.
-
-This also means positions are reported to millimetre precision but are only
-accurate to a handful of centimetres. Do not read more into the decimals than
-the error estimate supports.
-
-## Frame rate — read this before joining to tracking
-
-**Pose is 25 fps. The tracking data in the opendata repo is 10 fps.** The frame
-numbering differs accordingly: this file runs to frame 153,252 for a match whose
-tracking file ends at frame 61,300.
-
-Both cover the same wall-clock time, so:
-
-```
-pose_frame = 2.5 * tracking_frame
-```
-
-Every **5th pose frame** (a multiple of 5) lands exactly on an **even-numbered
-tracking frame**. Those are the frames where pose and tracking align without
-interpolation.
-
-## Coverage
-
-Pose is not available for every player in every frame — it requires the player
-to be visible and resolvable in the broadcast image. For match 1925299:
-
-| | |
-|---|---|
-| Frames in file | 153,252 |
-| Frames with at least one pose | 106,757 (69.7%) |
-| Player-frames total | 4,902,560 |
-| Player-frames with pose | 1,540,715 (31.4%) |
-| Average players with pose, per frame that has any | 14.4 |
-| Total joint observations | 44,680,735 |
-
-A player's `joints` field is `null` when pose could not be resolved for them in
-that frame, while their `x`/`y` position may still be present. Expect gaps when
-players are off-camera, occluded, or in a crowd.
-
-## Limitations
-
-* Body Pose is only provided for detected players.
-* Position on the z-axis is accurate relatively to the player's centroid, but
-  not necessarily in the pitch coordinate system. This will come with future
-  Body Pose enhancements.
-* XY Tracking data and Body Pose are generated separately. This can cause minor
-  misalignments between the XY attributes (positions, `is_detected` flag) and
-  the Body Pose joints.
-
-## Loading
-
-The archives are large, so download rather than stream:
-
-```python
-import json
-import zipfile
-
-from huggingface_hub import hf_hub_download
-
-path = hf_hub_download(
-    repo_id="SkillCorner/opendata-bodypose",
-    filename="raw/1925299.jsonl.zip",
-    repo_type="dataset",
-)
-
-with zipfile.ZipFile(path) as z:
-    with z.open("1925299.jsonl") as fh:
-        for line in fh:
-            frame = json.loads(line)
-            for player in frame["player_data"]:
-                if player["joints"]:
-                    ...  # 29 joints, each with xyz and p90_mae_cm
-```
-
-Reading the whole match into memory as JSON is not advisable — process it frame
-by frame, or convert the parts you need into a columnar format first.
+3D visualizer tool for [SkilCorner's Body Pose dataset](https://github.com/SkillCorner/opendata/tree/master/data/bodypose)
 
 ## 3D Body Pose Animation (`animate.py`)
 
-A Python animation script is provided in this repository to visualize 3D body pose tracking data for soccer players, inspired by the [Sport Performance Lab (SPL) basketball animation tool](https://github.com/Sport-Performance-Lab/SPL-Open-Data/blob/main/basketball/freethrow/animate.py).
+A Python animation script is provided in this repository to visualize 3D body pose tracking data for soccer players. Inspired by the [Sport Performance Lab (SPL) basketball animation tool](https://github.com/Sport-Performance-Lab/SPL-Open-Data/blob/main/basketball/freethrow/animate.py).
 
 ### Features
 - **29 Anatomical Joints & 41 Connections:** Complete skeleton graph covering head/craniofacial, spine, torso/pelvis, arms/hands, and legs/feet.
@@ -187,26 +17,72 @@ A Python animation script is provided in this repository to visualize 3D body po
 ### Command-Line Usage
 
 ```bash
-# Animate all visible players across the whole pitch for 100 frames
-python animate.py -a -s 36 -n 100 -o all_players_pitch.mp4
-
 # Animate 100 frames for player 795530 starting at frame 36 and save to MP4
-python animate.py -s 36 -n 100 -p 795530 -o player_795530.mp4
+python animate.py --match-id 1925299 -s 36 -n 100 -p 795530 -o player_795530.mp4
+```
 
+<img src="img/player_795530.gif" alt="Player 795530 animation" width="40%">
+
+```bash
 # Animate single player with camera fixed to their movement region (no camera pan)
-python animate.py -s 36 -n 100 -p 795530 --fixed-view -o player_fixed_view.mp4
+python animate.py -m 1925299 -s 150 -n 100 -p 795530 --fixed-view -o player_fixed_view.gif
+```
 
-# Animate single player on the fixed whole pitch view
-python animate.py -s 36 -n 100 -p 795530 --whole-pitch -o player_whole_pitch.mp4
+<img src="img/player_fixed_view.gif" alt="Player fixed view animation" width="40%">
 
-# Animate to GIF
-python animate.py -s 36 -n 50 -p 795530 -o animation.gif
+```bash
+# Animate all visible players without joint markers across the whole pitch for 100 frames
+python animate.py -m 1925299 -a -s 150 -n 100 --no-joints -o all_players_pitch.mp4
+```
 
+<img src="img/all_players_pitch.gif" alt="All players pitch animation" width="40%">
+
+```bash
 # Auto-detect the most active player in a frame window
-python animate.py -s 1000 -n 100
+python animate.py -m 1925299 -s 1000 -n 100 -o most_active_player.mp4
+```
 
+<img src="img/most_active_player.gif" alt="Most active player animation" width="40%">
+
+```bash
 # Discover active players and pose coverage in a frame window
-python animate.py -s 36 -n 250 --list-players
+python animate.py -m 1925299 -s 36 -n 250 --list-players
+[*] Input file: raw/1925299.jsonl
+[*] Scanning 250 frames starting at frame 36 for active players...
+Player ID    | Team ID    | Valid Pose Frames  | Coverage (%)
+-------------------------------------------------------------
+50982        | 871        | 250                |  100.0%
+795530       | 871        | 250                |  100.0%
+51694        | 871        | 250                |  100.0%
+560987       | 871        | 250                |  100.0%
+966114       | 871        | 250                |  100.0%
+560984       | 871        | 250                |  100.0%
+51043        | 1802       | 250                |  100.0%
+51002        | 1802       | 250                |  100.0%
+560882       | 1802       | 250                |  100.0%
+797298       | 1802       | 250                |  100.0%
+560986       | 1802       | 250                |  100.0%
+795537       | 1802       | 250                |  100.0%
+560989       | 871        | 233                |   93.2%
+809166       | 871        | 208                |   83.2%
+11897        | 871        | 198                |   79.2%
+287934       | 1802       | 193                |   77.2%
+560983       | 1802       | 178                |   71.2%
+965697       | 1802       | 156                |   62.4%
+51050        | 1802       | 153                |   61.2%
+966112       | 871        | 113                |   45.2%
+560985       | 871        | 0                  |    0.0%
+50999        | 1802       | 0                  |    0.0%
+69111        | 1802       | 0                  |    0.0%
+560988       | 871        | 0                  |    0.0%
+966115       | 871        | 0                  |    0.0%
+795533       | 871        | 0                  |    0.0%
+795541       | 1802       | 0                  |    0.0%
+51722        | 1802       | 0                  |    0.0%
+965698       | 1802       | 0                  |    0.0%
+809869       | 871        | 0                  |    0.0%
+333110       | 1802       | 0                  |    0.0%
+966113       | 871        | 0                  |    0.0%
 ```
 
 ### CLI Flags
@@ -219,8 +95,7 @@ python animate.py -s 36 -n 250 --list-players
 | `-s`, `--start-frame` | `int` | Starting frame number (0-indexed). Auto-detected if omitted. |
 | `-n`, `--num-frames` | `int` | Number of frames to animate (default: `100`, ~4 sec at 25 fps). |
 | `-p`, `--player-id` | `int` | Target player ID (single-player mode). Auto-selects active player if omitted. |
-| `-o`, `--output` | `str` | Output path (`.mp4` or `.gif`). Defaults to `pose_<player_id|all_players>_f<start>_<n>frames.mp4`. |
-| `-i`, `--input` | `str` | Path to `.jsonl` file (defaults to first match in `raw/`). |
+| `-o`, `--output` | `str` | Output path (`.mp4` or `.gif`). Defaults to `pose_<player_id\|all_players>_f<start>_<n>frames.mp4`. |
 | `--list-players` | *flag* | Scans the frame window, prints active player IDs and coverage, and exits. |
 | `--elev`, `--azim` | `float` | 3D camera elevation and azimuth angles (defaults: `20.0`, `45.0`). |
 | `--xbuffer`, `--ybuffer` | `float` | View half-buffers in metres around player hip (default: `2.5`). |
@@ -230,6 +105,7 @@ python animate.py -s 36 -n 250 --list-players
 | `--no-ball` | *flag* | Do not render the ball trajectory. |
 | `--no-pitch` | *flag* | Do not render field markings at $z=0$. |
 | `--no-joints` | *flag* | Render lines only (no joint marker points). |
+| `--no-axis` | *flag* | Turn off the 3D coordinate pane axis and tick marks. |
 | `--fixed-view` | *flag* | Fix camera to player movement region instead of tracking/following player. |
 | `--max-error-cm` | `float` | Filter out joints where `p90_mae_cm` exceeds threshold. |
 

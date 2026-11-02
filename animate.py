@@ -341,18 +341,13 @@ def seek_to_frame(f, offsets: Optional[np.ndarray], frame_idx: int) -> bool:
         return True
 
 
-def load_player_team_map(jsonl_path: str) -> Dict[int, int]:
+def load_player_team_map(opendata_dir: str, match_id: str) -> Dict[int, int]:
     """
     Build a player_id -> team_id mapping from the complementary SkillCorner
     open-data match metadata for the same match id, if available.
     Returns an empty dict when the match metadata cannot be located.
     """
-    base = os.path.basename(jsonl_path)
-    m = re.search(r"^(\d+)\.jsonl$", base)
-    if not m:
-        return {}
-    match_id = m.group(1)
-    match_path = os.path.join("opendata", "data", "matches", match_id, f"{match_id}_match.json")
+    match_path = os.path.join(opendata_dir, "opendata", "data", "matches", match_id, f"{match_id}_match.json")
     if not os.path.exists(match_path):
         return {}
     try:
@@ -700,6 +695,7 @@ def animate_soccer_pose(
     fps: int = 25,
     dpi: int = 100,
     notebook_mode: bool = False,
+    no_axis: bool = False,
     offsets: Optional[np.ndarray] = None,
 ) -> FuncAnimation:
     """
@@ -771,6 +767,8 @@ def animate_soccer_pose(
         DPI resolution for the exported video/gif.
     - notebook_mode: bool
         If True, configures matplotlib for inline HTML5 rendering in Jupyter.
+    - no_axis: bool
+        If True, turns off the 3D coordinate pane axes via ax.set_axis_off().
     - offsets: np.ndarray, optional
         Pre-computed line byte-offsets array for instant O(1) seeking.
 
@@ -822,21 +820,23 @@ def animate_soccer_pose(
     else:
         ax.set_zlim([0, zlim])
 
-    # Clean transparent panes
-    ax.xaxis.pane.fill = False
-    ax.yaxis.pane.fill = False
-    ax.zaxis.pane.fill = False
-    ax.xaxis.pane.set_edgecolor((1.0, 1.0, 1.0, 0.05))
-    ax.yaxis.pane.set_edgecolor((1.0, 1.0, 1.0, 0.05))
-    ax.zaxis.pane.set_edgecolor((1.0, 1.0, 1.0, 0.05))
-    ax.grid(False)
+    if no_axis:
+        ax.set_axis_off()
+    else:
+      # Clean transparent panes
+      ax.xaxis.pane.fill = False
+      ax.yaxis.pane.fill = False
+      ax.zaxis.pane.fill = False
+      ax.xaxis.pane.set_edgecolor((1.0, 1.0, 1.0, 0.05))
+      ax.yaxis.pane.set_edgecolor((1.0, 1.0, 1.0, 0.05))
+      ax.zaxis.pane.set_edgecolor((1.0, 1.0, 1.0, 0.05))
+      ax.grid(False)
 
-    # Style coordinate axes
-    ax.set_axis_off()
-    # ax.tick_params(colors="#888888", labelsize=8)
-    # ax.set_xlabel("Pitch X (m)", color="#aaaaaa", labelpad=10, fontsize=9)
-    # ax.set_ylabel("Pitch Y (m)", color="#aaaaaa", labelpad=10, fontsize=9)
-    # ax.set_zlabel("Height Z (m)", color="#aaaaaa", labelpad=6, fontsize=9)
+      # Style coordinate axes
+      ax.tick_params(colors="#888888", labelsize=8)
+      ax.set_xlabel("Pitch X (m)", color="#aaaaaa", labelpad=10, fontsize=9)
+      ax.set_ylabel("Pitch Y (m)", color="#aaaaaa", labelpad=10, fontsize=9)
+      ax.set_zlabel("Height Z (m)", color="#aaaaaa", labelpad=6, fontsize=9)
 
     # Pitch markings
     if show_pitch:
@@ -1243,11 +1243,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     # Core required/frequent flags
     parser.add_argument(
-        "-i", "--input",
-        dest="jsonl_path",
+        "-m", "--match-id",
+        dest="match_id",
         type=str,
         default=None,
-        help="Path to the SkillCorner .jsonl file (defaults to first .jsonl found in raw/).",
+        help="SkillCorner match identifier (string).",
     )
     parser.add_argument(
         "-s", "--start-frame",
@@ -1319,6 +1319,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Do not render joint markers (lines only).",
     )
     parser.add_argument(
+        "--no-axis",
+        dest="no_axis",
+        action="store_true",
+        default=False,
+        help="Turn off the 3D coordinate pane axis for a clean view.",
+    )
+    parser.add_argument(
         "--fixed-view",
         dest="follow_player",
         action="store_false",
@@ -1344,6 +1351,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Filter out joints with p90_mae_cm above this threshold in cm.",
     )
     parser.add_argument(
+        "--hf-dir",
+        dest="hf_dir",
+        type=str,
+        default=os.getcwd(),
+        help="Path to the Hugging Face data download root directory.",
+    )
+    parser.add_argument(
+        "--sc-opendata-dir",
+        dest="sc_opendata_dir",
+        type=str,
+        default=os.getcwd(),
+        help="Path to the cloned SkillCorner opendata repository root directory.",
+    )
+    parser.add_argument(
         "--list-players",
         action="store_true",
         help="Scan and list players detected in the frame range, then exit.",
@@ -1356,10 +1377,8 @@ def main():
     parser = build_arg_parser()
     args = parser.parse_args()
 
-    # Determine input path
-    jsonl_path = args.jsonl_path
-    if jsonl_path is None:
-        jsonl_path = find_default_jsonl()
+    # Construct input path from HF download root and match id
+    jsonl_path = os.path.join(args.hf_dir, "raw", f"{args.match_id}.jsonl")
 
     if not os.path.exists(jsonl_path):
         print(f"Error: Target file '{jsonl_path}' not found.", file=sys.stderr)
@@ -1375,7 +1394,7 @@ def main():
         scan_start = args.start_frame if args.start_frame is not None else 0
         scan_count = max(args.num_frames, 250)
         print(f"[*] Scanning {scan_count} frames starting at frame {scan_start} for active players...")
-        team_map = load_player_team_map(jsonl_path)
+        team_map = load_player_team_map(args.sc_opendata_dir, args.match_id)
         candidates = locate_active_players(
             jsonl_path,
             start_frame=scan_start,
@@ -1449,6 +1468,7 @@ def main():
         output_path=output_path,
         fps=args.fps,
         dpi=args.dpi,
+        no_axis=args.no_axis,
         offsets=offsets,
     )
 
