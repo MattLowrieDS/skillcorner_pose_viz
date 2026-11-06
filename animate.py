@@ -38,12 +38,12 @@ from constants import ALL_JOINTS, CONNECTIONS, SIDE_COLORS
 from data_loading import (
     get_line_offsets,
     load_pose_data,
-    compute_stride_length,
     find_first_player_frame,
     locate_active_players,
     load_player_team_map,
 )
 from flags import build_arg_parser
+from metrics import compute_stride_length
 
 
 def get_connection_color(
