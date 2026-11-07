@@ -135,6 +135,42 @@ anim_single = animate_soccer_pose(
 )
 ```
 
+## Biomechanical Statistics (`metrics.py`)
+
+A `metrics.py` module is provided for computing biomechanical statistics from 3D body pose trajectories (a mapping of joint name -> `(n_frames, 3)` array of `[x, y, z]` in metres).
+
+### Functions
+
+| Function | Description | Returns |
+|---|---|---|
+| `compute_stride_length` | Per-frame foot-to-foot Euclidean distance in the x/y pitch plane using ankle joints (heel fallback), with optional height filtering to exclude high kicks. | `np.ndarray` of shape `(n_frames,)` — stride length in metres per frame (NaN where missing/too high). |
+| `compute_num_steps` | Detects foot strike events from smoothed stride signals, gated by hip velocity and physiological cadence bounds. | `(total_steps, step_frames, mean_spm)` — step count, frame indices of strikes, and cadence in steps/minute. |
+| `compute_3point_angle` | Computes the 3D planar angle at vertex p2 between rays p2->p1 and p2->p3 (perspective-invariant). Generalized for any 3-point triad (hip-knee-ankle, shoulder-elbow-wrist, etc.). | `np.ndarray` of planar angles in degrees (or radians). |
+| `compute_knee_angles` | Per-frame knee angle for both left and right legs from hip -> knee -> ankle joints. Supports "included" (back-of-knee, 180 deg straight) and "flexion" (0 deg straight) conventions, optional Savitzky-Golay smoothing, and heel fallback. | `Dict[str, np.ndarray]` with `"left"` and `"right"` arrays of shape `(n_frames,)`. |
+| `compute_hip_orientation` | Per-frame pelvic orientation angle in the horizontal pitch plane from the lHip -> midHip -> rHip connection, with single-hip midHip fallback. | `np.ndarray` of shape `(n_frames,)` — degrees (-180, 180] or radians (-pi, pi]. |
+| `compute_turning_velocity` | Player turning velocity (rate of rotation of the pelvic connection around the vertical or spine axis), with phase unwrapping, Savitzky-Golay derivative smoothing, and signed or absolute output. | `np.ndarray` of shape `(n_frames,)` — deg/s or rad/s. |
+
+### Example Usage
+
+```python
+from metrics import (
+    compute_stride_length,
+    compute_num_steps,
+    compute_knee_angles,
+    compute_hip_orientation,
+    compute_turning_velocity,
+)
+
+# joint_trajectories: dict[str, np.ndarray] of (n_frames, 3) in metres
+strides = compute_stride_length(joint_trajectories)
+total_steps, step_frames, mean_spm = compute_num_steps(joint_trajectories, fps=25.0)
+knee_angles = compute_knee_angles(joint_trajectories, angle_convention="flexion")
+hip_orientation = compute_hip_orientation(joint_trajectories)
+turning_velocity = compute_turning_velocity(joint_trajectories, axis="vertical", absolute=True)
+```
+
+All functions return NaN for frames where the required joints are missing or invalid, and each accepts custom joint-name keyword arguments to match your trajectory keys.
+
 ## Related data
 
 The rest of the open dataset — broadcast tracking, dynamic events, phases of

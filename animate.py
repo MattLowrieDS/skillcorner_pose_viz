@@ -43,7 +43,7 @@ from data_loading import (
     load_player_team_map,
 )
 from flags import build_arg_parser
-from metrics import compute_stride_length
+from metrics import compute_knee_angles, compute_num_steps, compute_stride_length, compute_turning_velocity
 
 
 def get_connection_color(
@@ -525,6 +525,26 @@ def animate_soccer_pose(
         resolved_player_id = data["player_id"]
         joint_data = data["joint_trajectories"]
         stride_lengths = compute_stride_length(joint_data)
+        total_steps, step_frames, mean_spm = compute_num_steps(joint_data, fps=float(fps))
+        knee_angles = compute_knee_angles(joint_data)
+        turning_velocity = compute_turning_velocity(joint_data, fps=float(fps))
+
+        per_frame_steps = np.zeros(actual_frames, dtype=int)
+        for i in range(actual_frames):
+            per_frame_steps[i] = int(np.sum(step_frames <= i))
+
+        per_frame_spm = np.zeros(actual_frames, dtype=float)
+        if total_steps >= 2:
+            for k in range(len(step_frames) - 1):
+                f_start = step_frames[k]
+                f_end = step_frames[k + 1]
+                dt = (f_end - f_start) / float(fps)
+                if dt <= 1.5:
+                    per_frame_spm[f_start : f_end + 1] = 60.0 / dt
+            if (step_frames[1] - step_frames[0]) / float(fps) <= 1.5:
+                per_frame_spm[: step_frames[0]] = 60.0 / ((step_frames[1] - step_frames[0]) / float(fps))
+            if (step_frames[-1] - step_frames[-2]) / float(fps) <= 1.5:
+                per_frame_spm[step_frames[-1] + 1 :] = 60.0 / ((step_frames[-1] - step_frames[-2]) / float(fps))
 
         # Local ground grid beneath player (depth perception)
         ground_grid_lines = []
@@ -667,8 +687,28 @@ def animate_soccer_pose(
                 if valid_centroid:
                     hud_lines.append(f"Position: ({mid_hip[0]:.2f}m, {mid_hip[1]:.2f}m)")
                     stride = stride_lengths[frame_i]
-                    if not np.isnan(stride):
-                        hud_lines.append(f"Stride Length: {stride:.2f}m")
+                    hud_lines.append(f"Stride Length: {stride:.2f}m")
+                    lk = knee_angles["left"][frame_i]
+                    rk = knee_angles["right"][frame_i]
+                    hud_lines.append(
+                        f"Left Knee Angle: {lk:.1f}°"
+                        if not np.isnan(lk)
+                        else "Left Knee Angle: --°"
+                    )
+                    hud_lines.append(
+                        f"Right Knee Angle: {rk:.1f}°"
+                        if not np.isnan(rk)
+                        else "Right Knee Angle: --°"
+                    )
+                    spm = per_frame_spm[frame_i]
+                    hud_lines.append(f"Steps/min: {spm:.1f}")
+                    turn_vel = turning_velocity[frame_i]
+                    hud_lines.append(
+                        f"Hip Turn Velocity: {turn_vel:.1f}°/s"
+                        if not np.isnan(turn_vel)
+                        else "Hip Turn Velocity: --°/s"
+                    )
+                    hud_lines.append(f"Steps: {per_frame_steps[frame_i]}/{total_steps}")
                 if show_ball and ball_detected[frame_i]:
                     bx, by, bz = ball_data[frame_i]
                     hud_lines.append(f"Ball: ({bx:.1f}m, {by:.1f}m, z={bz:.2f}m)")
