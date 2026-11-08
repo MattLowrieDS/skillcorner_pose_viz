@@ -25,14 +25,14 @@ python animate.py --match-id 1925299 -s 36 -n 100 -p 795530 -o player_795530.mp4
 
 ```bash
 # Animate single player with camera fixed to their movement region (no camera pan)
-python animate.py -m 1925299 -s 150 -n 100 -p 795530 --fixed-view -o player_fixed_view.gif
+python animate.py -m 1925299 -s 150 -n 100 -p 795530 --fixed-view --no-joints -o player_fixed_view.gif
 ```
 
 <img src="img/player_fixed_view.gif" alt="Player fixed view animation" width="40%">
 
 ```bash
 # Animate all visible players without joint markers across the whole pitch for 100 frames
-python animate.py -m 1925299 -a -s 150 -n 100 --no-joints -o all_players_pitch.mp4
+python animate.py -m 1925299 -s 150 -n 100 -a --no-joints -o all_players_pitch.mp4
 ```
 
 <img src="img/all_players_pitch.gif" alt="All players pitch animation" width="40%">
