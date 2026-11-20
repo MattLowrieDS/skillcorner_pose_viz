@@ -4,9 +4,59 @@ SkillCorner Body Pose — Metrics
 """
 
 import numpy as np
+from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
 from constants import ALL_JOINTS
 from scipy.signal import find_peaks, savgol_filter
+
+
+@dataclass(frozen=True)
+class StepMetrics:
+    """Peak-based step metrics for a single trajectory window.
+
+    Attributes:
+    -----------
+    - steps_total: int
+        Number of speed-gated step-separation peaks detected.
+    - step_frames: np.ndarray of shape (steps_total,)
+        Absolute frame indices of the detected peaks.
+    - peak_separations_m: np.ndarray of shape (steps_total,)
+        Smoothed horizontal foot-to-foot separation at each detected peak,
+        i.e. the step length at maximum extension (near ground contact).
+    - cadence_spm: float
+        Mean cadence (steps per minute) across active step intervals.
+        0.0 when fewer than two steps are detected.
+    - peak_separation_mean_m: float
+        Mean of ``peak_separations_m``; NaN when no peak was detected.
+    - smoothed_separation_max_m: float
+        Maximum of the smoothed foot-separation span; NaN when no smoothed
+        span exists. Used as the zero-peak fallback by feature_eng.py.
+    - foot_separation_max_m: float
+        Maximum of the raw per-frame foot separation; NaN when no valid
+        frame exists.
+    """
+
+    steps_total: int
+    step_frames: np.ndarray
+    peak_separations_m: np.ndarray
+    cadence_spm: float
+    peak_separation_mean_m: float
+    smoothed_separation_max_m: float
+    foot_separation_max_m: float
+
+
+def _empty_step_metrics(foot_separation_max_m: float = float("nan")) -> StepMetrics:
+    """Return a zero-step StepMetrics instance for empty/degenerate inputs."""
+    return StepMetrics(
+        steps_total=0,
+        step_frames=np.array([], dtype=int),
+        peak_separations_m=np.array([], dtype=float),
+        cadence_spm=0.0,
+        peak_separation_mean_m=float("nan"),
+        smoothed_separation_max_m=float("nan"),
+        foot_separation_max_m=float(foot_separation_max_m),
+    )
+
 
 def compute_stride_length(
     joint_trajectories: Dict[str, np.ndarray],
@@ -107,7 +157,7 @@ def compute_stride_length(
     return stride_lengths
 
 
-def compute_num_steps(
+def compute_step_metrics(
     joint_trajectories: Dict[str, np.ndarray],
     fps: float = 25.0,
     min_prominence_m: float = 0.07,
@@ -120,10 +170,10 @@ def compute_num_steps(
     left_heel_joint: str = "lHeel",
     right_heel_joint: str = "rHeel",
     height_threshold_m: Optional[float] = None,
-) -> Tuple[int, np.ndarray, float]:
+) -> StepMetrics:
     """
-    Calculate the number of steps and steps per minute (cadence in SPM)
-    from 3D body pose trajectories.
+    Detect steps and compute peak step separations, step frames, and cadence
+    (steps per minute) from 3D body pose trajectories.
 
     Step events are identified by detecting periodic foot separation peaks
     (strikes) in the horizontal pitch plane, filtered with Savitzky-Golay
@@ -156,21 +206,26 @@ def compute_num_steps(
 
     Returns:
     --------
-    - total_steps: int
-        Total number of valid steps detected in the sequence.
-    - step_frames: np.ndarray of shape (total_steps,)
-        0-indexed frame indices where each foot strike peak was detected.
-    - mean_spm: float
-        Average cadence in steps per minute across active step intervals.
-        Returns 0.0 if fewer than 2 steps are detected or player was stationary.
+    - StepMetrics
+        Dataclass containing:
+          * ``steps_total`` — number of speed-gated peaks detected;
+          * ``step_frames`` — absolute frame indices of the detected peaks;
+          * ``peak_separations_m`` — smoothed foot separation at each peak
+            (step length at maximum extension);
+          * ``cadence_spm`` — mean cadence across active intervals;
+          * ``peak_separation_mean_m`` — mean of the peak separations (NaN
+            when no peak was detected);
+          * ``smoothed_separation_max_m`` — max of the smoothed span (zero-peak
+            fallback; NaN when no smoothed span exists);
+          * ``foot_separation_max_m`` — max of the raw per-frame separation.
     """
     if not joint_trajectories:
-        return 0, np.array([], dtype=int), 0.0
+        return _empty_step_metrics()
 
     # Determine sequence length
     first_arr = next(iter(joint_trajectories.values()), None)
     if first_arr is None or len(first_arr) == 0:
-        return 0, np.array([], dtype=int), 0.0
+        return _empty_step_metrics()
     n_frames = len(first_arr)
 
     # Compute horizontal foot-to-foot distance
@@ -183,12 +238,16 @@ def compute_num_steps(
         height_threshold_m=height_threshold_m,
     )
 
+    foot_separation_max_m = (
+        float(np.nanmax(strides)) if np.any(~np.isnan(strides)) else float("nan")
+    )
+
     valid_mask = ~np.isnan(strides)
     valid_indices = np.where(valid_mask)[0]
 
     # Need enough valid frames to detect steps
     if len(valid_indices) < max(5, smooth_window_frames):
-        return 0, np.array([], dtype=int), 0.0
+        return _empty_step_metrics(foot_separation_max_m)
 
     # Calculate midHip horizontal speed for velocity gating if midHip is present
     mid_hip = joint_trajectories.get("midHip")
@@ -239,6 +298,10 @@ def compute_num_steps(
     else:
         smoothed = s_segment
 
+    smoothed_separation_max_m = (
+        float(np.max(smoothed)) if len(smoothed) > 0 else float("nan")
+    )
+
     # Minimum distance between steps based on maximum physiological cadence
     min_dist = max(3, int(np.floor(fps * 60.0 / max_cadence_spm)))
 
@@ -246,28 +309,91 @@ def compute_num_steps(
     detected_frames = peaks_rel + first_v
 
     # Filter out peaks where player was stationary
-    gated_frames = []
-    for f in detected_frames:
-        spd = speed_smooth[f]
-        if np.isnan(spd) or spd >= min_speed_mps:
-            gated_frames.append(f)
+    gated_mask = np.array(
+        [
+            np.isnan(speed_smooth[f]) or speed_smooth[f] >= min_speed_mps
+            for f in detected_frames
+        ],
+        dtype=bool,
+    )
 
-    step_frames = np.array(gated_frames, dtype=int)
+    step_frames = np.array(detected_frames[gated_mask], dtype=int)
     total_steps = int(len(step_frames))
 
-    if total_steps < 2:
-        return total_steps, step_frames, 0.0
-
-    # Calculate intervals and mean SPM across active locomotion intervals
-    intervals_s = np.diff(step_frames) / fps
-    valid_intervals = intervals_s[intervals_s <= max_step_interval_s]
-
-    if len(valid_intervals) == 0:
-        mean_spm = 0.0
+    if total_steps > 0:
+        peak_separations_m = np.asarray(
+            smoothed[peaks_rel[gated_mask]], dtype=np.float64
+        )
+        peak_separation_mean_m = float(np.mean(peak_separations_m))
     else:
-        mean_spm = float(np.mean(60.0 / valid_intervals))
+        peak_separations_m = np.array([], dtype=np.float64)
+        peak_separation_mean_m = float("nan")
 
-    return total_steps, step_frames, float(round(mean_spm, 2))
+    cadence_spm = 0.0
+    if total_steps >= 2:
+        # Calculate intervals and mean SPM across active locomotion intervals
+        intervals_s = np.diff(step_frames) / fps
+        valid_intervals = intervals_s[intervals_s <= max_step_interval_s]
+        if len(valid_intervals) > 0:
+            cadence_spm = float(round(np.mean(60.0 / valid_intervals), 2))
+
+    return StepMetrics(
+        steps_total=total_steps,
+        step_frames=step_frames,
+        peak_separations_m=peak_separations_m,
+        cadence_spm=cadence_spm,
+        peak_separation_mean_m=peak_separation_mean_m,
+        smoothed_separation_max_m=smoothed_separation_max_m,
+        foot_separation_max_m=foot_separation_max_m,
+    )
+
+
+def compute_num_steps(
+    joint_trajectories: Dict[str, np.ndarray],
+    fps: float = 25.0,
+    min_prominence_m: float = 0.07,
+    min_speed_mps: float = 0.35,
+    max_cadence_spm: float = 260.0,
+    max_step_interval_s: float = 1.5,
+    smooth_window_frames: int = 9,
+    left_ankle_joint: str = "lAnkle",
+    right_ankle_joint: str = "rAnkle",
+    left_heel_joint: str = "lHeel",
+    right_heel_joint: str = "rHeel",
+    height_threshold_m: Optional[float] = None,
+) -> Tuple[int, np.ndarray, float]:
+    """
+    Calculate the number of steps and steps per minute (cadence in SPM)
+    from 3D body pose trajectories.
+
+    Thin backward-compatible wrapper around :func:`compute_step_metrics`;
+    see that function for the parameter documentation.
+
+    Returns:
+    --------
+    - total_steps: int
+        Total number of valid steps detected in the sequence.
+    - step_frames: np.ndarray of shape (total_steps,)
+        0-indexed frame indices where each foot strike peak was detected.
+    - mean_spm: float
+        Average cadence in steps per minute across active step intervals.
+        Returns 0.0 if fewer than 2 steps are detected or player was stationary.
+    """
+    metrics = compute_step_metrics(
+        joint_trajectories,
+        fps=fps,
+        min_prominence_m=min_prominence_m,
+        min_speed_mps=min_speed_mps,
+        max_cadence_spm=max_cadence_spm,
+        max_step_interval_s=max_step_interval_s,
+        smooth_window_frames=smooth_window_frames,
+        left_ankle_joint=left_ankle_joint,
+        right_ankle_joint=right_ankle_joint,
+        left_heel_joint=left_heel_joint,
+        right_heel_joint=right_heel_joint,
+        height_threshold_m=height_threshold_m,
+    )
+    return metrics.steps_total, metrics.step_frames, metrics.cadence_spm
 
 
 def compute_3point_angle(

@@ -11,6 +11,7 @@ from constants import ALL_JOINTS
 from metrics import (
     compute_stride_length,
     compute_num_steps,
+    compute_step_metrics,
     compute_3point_angle,
     compute_knee_angles,
     compute_hip_orientation,
@@ -268,6 +269,156 @@ class TestComputeNumSteps(unittest.TestCase):
         strides = compute_stride_length(jt)
         self.assertEqual(len(strides), 10)
         np.testing.assert_allclose(strides, 5.0)
+
+
+class TestComputeStepMetrics(unittest.TestCase):
+    """Test suite for compute_step_metrics in metrics.py."""
+
+    @staticmethod
+    def _running_fixture(
+        n_frames: int = 100,
+        speed_mps: float = 4.0,
+        cadence_spm: float = 180.0,
+        amplitude_m: float = 0.45,
+        lateral_offset_m: float = 0.15,
+    ) -> dict:
+        """Synthetic antiphase running gait at a fixed speed/cadence."""
+        fps = 25.0
+        step_freq = cadence_spm / 60.0
+        t = np.arange(n_frames) / fps
+        jt = _create_mock_joint_trajectories(n_frames)
+
+        jt["midHip"][:, 0] = speed_mps * t
+        jt["midHip"][:, 1] = 0.0
+        jt["midHip"][:, 2] = 0.95
+        jt["lKnee"][:, 2] = 0.50
+        jt["rKnee"][:, 2] = 0.50
+        jt["lKnee"][:, 0] = jt["midHip"][:, 0]
+        jt["rKnee"][:, 0] = jt["midHip"][:, 0]
+
+        phase = 2.0 * np.pi * (step_freq / 2.0) * t
+        jt["lAnkle"][:, 0] = jt["midHip"][:, 0] + amplitude_m * np.sin(phase)
+        jt["lAnkle"][:, 1] = lateral_offset_m
+        jt["lAnkle"][:, 2] = 0.10
+
+        jt["rAnkle"][:, 0] = jt["midHip"][:, 0] - amplitude_m * np.sin(phase)
+        jt["rAnkle"][:, 1] = -lateral_offset_m
+        jt["rAnkle"][:, 2] = 0.10
+        return jt
+
+    def test_running_180_peak_separation(self):
+        """Peak separations should match the synthetic antiphase extension."""
+        jt = self._running_fixture()
+        m = compute_step_metrics(jt, fps=25.0)
+
+        self.assertEqual(m.peak_separations_m.shape, (m.steps_total,))
+        self.assertEqual(m.step_frames.shape, (m.steps_total,))
+        self.assertGreaterEqual(m.steps_total, 10)
+        self.assertAlmostEqual(m.cadence_spm, 180.0, delta=6.0)
+
+        # Antiphase x-offsets (-0.45, +0.45) at y-offsets (-0.15, +0.15)
+        # -> raw peak separation = sqrt(0.9^2 + 0.3^2) = sqrt(0.9) ~ 0.9487 m.
+        # Savitzky-Golay smoothing (9-frame window at 25 fps) attenuates the
+        # peak by ~6%, so the smoothed peak mean sits a little below the raw max.
+        expected_peak = np.sqrt(0.9)
+        self.assertAlmostEqual(m.peak_separation_mean_m, expected_peak, delta=0.08)
+        self.assertAlmostEqual(m.foot_separation_max_m, expected_peak, delta=0.01)
+        self.assertAlmostEqual(
+            m.peak_separation_mean_m, float(np.mean(m.peak_separations_m)), places=6
+        )
+        self.assertTrue(np.all(m.peak_separations_m > 0.0))
+
+        # The peak metric must exceed the frame-averaged separation.
+        stride_mean = float(np.nanmean(compute_stride_length(jt)))
+        self.assertGreater(m.peak_separation_mean_m, stride_mean)
+
+    def test_zero_peak_fallback_fields(self):
+        """Constant separation has no peaks, but exposes the smoothed max."""
+        jt = _create_mock_joint_trajectories(60)
+        jt["midHip"][:, 0] = np.linspace(0.0, 5.0, 60)
+        jt["midHip"][:, 1] = 0.0
+        jt["midHip"][:, 2] = 0.95
+        jt["lAnkle"][:, :] = [0.0, 0.0, 0.1]
+        jt["rAnkle"][:, :] = [0.5, 0.0, 0.1]
+
+        m = compute_step_metrics(jt, fps=25.0)
+        self.assertEqual(m.steps_total, 0)
+        self.assertEqual(m.peak_separations_m.size, 0)
+        self.assertTrue(np.isnan(m.peak_separation_mean_m))
+        self.assertAlmostEqual(m.smoothed_separation_max_m, 0.5, places=6)
+        self.assertAlmostEqual(m.foot_separation_max_m, 0.5, places=6)
+
+    def test_stationary_gated_out(self):
+        """Stationary jitter yields no gated peaks and a NaN peak mean."""
+        np.random.seed(42)
+        jt = _create_mock_joint_trajectories(80)
+        jt["midHip"][:, 0] = 5.0 + 0.005 * np.random.randn(80)
+        jt["midHip"][:, 1] = 10.0 + 0.005 * np.random.randn(80)
+        jt["midHip"][:, 2] = 0.95
+        jt["lAnkle"][:, 0] = 5.0 + 0.01 * np.random.randn(80)
+        jt["lAnkle"][:, 1] = 10.2 + 0.01 * np.random.randn(80)
+        jt["lAnkle"][:, 2] = 0.10
+        jt["rAnkle"][:, 0] = 5.0 + 0.01 * np.random.randn(80)
+        jt["rAnkle"][:, 1] = 9.8 + 0.01 * np.random.randn(80)
+        jt["rAnkle"][:, 2] = 0.10
+
+        m = compute_step_metrics(jt, fps=25.0)
+        self.assertEqual(m.steps_total, 0)
+        self.assertEqual(m.peak_separations_m.size, 0)
+        self.assertTrue(np.isnan(m.peak_separation_mean_m))
+        self.assertFalse(np.isnan(m.smoothed_separation_max_m))
+
+    def test_nan_and_heel_fallback_matches_num_steps(self):
+        """Shared detector must reproduce compute_num_steps peaks exactly."""
+        fps = 25.0
+        n_frames = 100
+        jt = self._running_fixture(n_frames=n_frames, cadence_spm=180.0)
+
+        jt["lHeel"][:, 0] = jt["lAnkle"][:, 0] - 0.05
+        jt["lHeel"][:, 1] = 0.15
+        jt["lHeel"][:, 2] = 0.10
+        jt["lAnkle"][30:33, :] = np.nan
+        jt["lAnkle"][50:52, :] = np.nan
+        jt["lHeel"][50:52, :] = np.nan
+
+        m = compute_step_metrics(jt, fps=fps)
+        total_steps, step_frames, mean_spm = compute_num_steps(jt, fps=fps)
+
+        self.assertEqual(m.steps_total, total_steps)
+        np.testing.assert_array_equal(m.step_frames, step_frames)
+        self.assertEqual(m.cadence_spm, mean_spm)
+        self.assertEqual(m.peak_separations_m.size, total_steps)
+
+    def test_empty_all_nan_and_short_inputs(self):
+        """Degenerate inputs must return safe StepMetrics without exceptions."""
+        for jt in ({}, _create_mock_joint_trajectories(50),
+                   _create_mock_joint_trajectories(3)):
+            m = compute_step_metrics(jt)
+            self.assertEqual(m.steps_total, 0)
+            self.assertEqual(m.step_frames.size, 0)
+            self.assertEqual(m.peak_separations_m.size, 0)
+            self.assertEqual(m.cadence_spm, 0.0)
+            self.assertTrue(np.isnan(m.peak_separation_mean_m))
+            self.assertTrue(np.isnan(m.smoothed_separation_max_m))
+            self.assertTrue(np.isnan(m.foot_separation_max_m))
+
+    def test_real_match_peak_separation_if_available(self):
+        """Smoke test on real match data from Match 1925299 if present."""
+        raw_path = "../raw/1925299.jsonl"
+        if not os.path.exists(raw_path):
+            self.skipTest("Raw match data file not found.")
+
+        from data_loading import load_pose_data
+
+        run_data = load_pose_data(
+            raw_path, start_frame=10000, num_frames=100, player_id=50982
+        )
+        m = compute_step_metrics(run_data["joint_trajectories"])
+        self.assertGreater(m.steps_total, 0)
+        self.assertFalse(np.isnan(m.peak_separation_mean_m))
+        self.assertGreater(m.peak_separation_mean_m, 0.3)
+        self.assertLess(m.peak_separation_mean_m, 1.3)
+        self.assertLessEqual(m.peak_separation_mean_m, m.foot_separation_max_m)
 
 
 class TestCompute3PointAngle(unittest.TestCase):
